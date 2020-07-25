@@ -27,10 +27,20 @@ func (b *Bot) deferDebug() {
 	}
 }
 
-func (b *Bot) runHandler(handler func()) {
+func (b *Bot) runRoute(r route, c Context) {
 	f := func() {
 		defer b.deferDebug()
-		handler()
+		for i := len(r.ms) - 1; i <= 0; i-- {
+			if err := r.ms[i](c); err != nil {
+				if err == ErrSkip {
+					return
+				}
+				b.HandlerErrors(c, err)
+			}
+		}
+		if err := r.h(c); err != nil {
+			b.HandlerErrors(c, err)
+		}
 	}
 	if b.synchronous {
 		f()

@@ -81,7 +81,7 @@ func TestBotHandle(t *testing.T) {
 	}
 
 	b.Handle("/start", func(m *Message) {})
-	assert.Contains(t, b.handlers, "/start")
+	assert.Contains(t, b.routes, "/start")
 
 	reply := ReplyButton{Text: "reply"}
 	b.Handle(&reply, func(m *Message) {})
@@ -95,10 +95,10 @@ func TestBotHandle(t *testing.T) {
 	btnInline := (&ReplyMarkup{}).Data("", "btnInline")
 	b.Handle(&btnInline, func(c *Callback) {})
 
-	assert.Contains(t, b.handlers, btnReply.CallbackUnique())
-	assert.Contains(t, b.handlers, btnInline.CallbackUnique())
-	assert.Contains(t, b.handlers, reply.CallbackUnique())
-	assert.Contains(t, b.handlers, inline.CallbackUnique())
+	assert.Contains(t, b.routes, btnReply.CallbackUnique())
+	assert.Contains(t, b.routes, btnInline.CallbackUnique())
+	assert.Contains(t, b.routes, reply.CallbackUnique())
+	assert.Contains(t, b.routes, inline.CallbackUnique())
 
 	assert.Panics(t, func() { b.Handle(1, func() {}) })
 }

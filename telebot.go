@@ -36,6 +36,7 @@ var (
 	ErrCouldNotUpdate  = errors.New("telebot: could not fetch new updates")
 	ErrTrueResult      = errors.New("telebot: result is True")
 	ErrBadContext      = errors.New("telebot: context does not contain message")
+	ErrSkip            = errors.New("telebot: skip error")
 )
 
 const DefaultApiURL = "https://api.telegram.org"
@@ -46,7 +47,7 @@ const DefaultApiURL = "https://api.telegram.org"
 // an "alert" character \a.
 //
 const (
-	// Basic message handlers.
+	// Basic message routes.
 	//
 	// Handler: func(*Message)
 	OnText              = "\atext"

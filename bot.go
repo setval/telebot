@@ -30,12 +30,13 @@ func NewBot(pref Settings) (*Bot, error) {
 	}
 
 	bot := &Bot{
-		Token:   pref.Token,
-		URL:     pref.URL,
-		Updates: make(chan Update, pref.Updates),
-		Poller:  pref.Poller,
+		Token:         pref.Token,
+		URL:           pref.URL,
+		Updates:       make(chan Update, pref.Updates),
+		Poller:        pref.Poller,
+		HandlerErrors: pref.HandlerError,
 
-		handlers:    make(map[string]interface{}),
+		routes:      make(map[string]route),
 		synchronous: pref.Synchronous,
 		verbose:     pref.Verbose,
 		parseMode:   pref.ParseMode,
@@ -65,13 +66,15 @@ type Bot struct {
 	Updates chan Update
 	Poller  Poller
 
-	handlers    map[string]interface{}
+	routes      map[string]route
 	synchronous bool
 	verbose     bool
 	parseMode   ParseMode
 	reporter    func(error)
 	stop        chan struct{}
 	client      *http.Client
+
+	HandlerErrors func(Context, error)
 }
 
 // Settings represents a utility struct for passing certain
@@ -89,7 +92,7 @@ type Settings struct {
 	// Poller is the provider of Updates.
 	Poller Poller
 
-	// Synchronous prevents handlers from running in parallel.
+	// Synchronous prevents routes from running in parallel.
 	// It makes ProcessUpdate return after the handler is finished.
 	Synchronous bool
 
@@ -103,7 +106,7 @@ type Settings struct {
 	ParseMode ParseMode
 
 	// Reporter is a callback function that will get called
-	// on any panics recovered from endpoint handlers.
+	// on any panics recovered from endpoint routes.
 	Reporter func(error)
 
 	// HTTP Client used to make requests to telegram api
@@ -111,6 +114,9 @@ type Settings struct {
 
 	// offline allows to create a bot without network for testing purposes.
 	offline bool
+
+	// HandlerError is called when an error occurs in a handler.
+	HandlerError func(Context, error)
 }
 
 // Update object represents an incoming update.
@@ -145,22 +151,30 @@ type Command struct {
 //
 // Example:
 //
-//     b.Handle("/help", func (m *tb.Message) {})
-//     b.Handle(tb.OnText, func (m *tb.Message) {})
-//     b.Handle(tb.OnQuery, func (q *tb.Query) {})
+//     b.Handle("/help", func (ctx.Context) {} error)
+//     b.Handle(tb.OnText, func (ctx.Context) {} error)
+//     b.Handle(tb.OnQuery, func (ctx.Context) {} error)
 //
 //     // make a hook for one of your preserved inline buttons.
-//     b.Handle(&inlineButton, func (c *tb.Callback) {})
+//     b.Handle(&inlineButton, func (ctx.Context) {} error)
 //
-func (b *Bot) Handle(endpoint interface{}, handler interface{}) {
+func (b *Bot) Handle(endpoint interface{}, handler HandlerFunc, middlewares ...MiddlewareFunc) {
+	var key string
+
 	switch end := endpoint.(type) {
 	case string:
-		b.handlers[end] = handler
+		key = end
 	case CallbackEndpoint:
-		b.handlers[end.CallbackUnique()] = handler
+		key = end.CallbackUnique()
 	default:
 		panic("telebot: unsupported endpoint")
 	}
+
+	b.routes[key] = route{
+		h:  handler,
+		ms: middlewares,
+	}
+
 }
 
 var (
@@ -173,6 +187,10 @@ var (
 func (b *Bot) Start() {
 	if b.Poller == nil {
 		panic("telebot: can't start without a poller")
+	}
+
+	if b.HandlerErrors == nil {
+		panic("telebot: can't start without a handler errors")
 	}
 
 	stop := make(chan struct{})
@@ -199,6 +217,10 @@ func (b *Bot) Stop() {
 // ProcessUpdate processes a single incoming update.
 // A started bot calls this function automatically.
 func (b *Bot) ProcessUpdate(upd Update) {
+	ctx := &nativeContext{
+		b: b,
+	}
+
 	if upd.Message != nil {
 		m := upd.Message
 
@@ -292,18 +314,20 @@ func (b *Bot) ProcessUpdate(upd Update) {
 			return
 		}
 
-		if m.MigrateTo != 0 {
-			if handler, ok := b.handlers[OnMigration]; ok {
-				handler, ok := handler.(func(int64, int64))
-				if !ok {
-					panic("telebot: migration handler is bad")
-				}
+		// todo ??
 
-				b.runHandler(func() { handler(m.Chat.ID, m.MigrateTo) })
-			}
-
-			return
-		}
+		//if m.MigrateTo != 0 {
+		//	if handler, ok := b.routes[OnMigration]; ok {
+		//		handler, ok := handler.(func(int64, int64))
+		//		if !ok {
+		//			panic("telebot: migration handler is bad")
+		//		}
+		//
+		//		b.runHandler(func() { handler(m.Chat.ID, m.MigrateTo) })
+		//	}
+		//
+		//	return
+		//}
 
 	}
 
@@ -330,6 +354,8 @@ func (b *Bot) ProcessUpdate(upd Update) {
 	}
 
 	if upd.Callback != nil {
+		ctx.Callback = upd.Callback
+
 		if upd.Callback.Data != "" {
 			if upd.Callback.MessageID != "" {
 				upd.Callback.Message = &Message{
@@ -345,14 +371,9 @@ func (b *Bot) ProcessUpdate(upd Update) {
 				if match != nil {
 					unique, payload := match[0][1], match[0][3]
 
-					if handler, ok := b.handlers["\f"+unique]; ok {
-						handler, ok := handler.(func(*Callback))
-						if !ok {
-							panic(fmt.Errorf("telebot: %s callback handler is bad", unique))
-						}
-
-						upd.Callback.Data = payload
-						b.runHandler(func() { handler(upd.Callback) })
+					if route, ok := b.routes["\f"+unique]; ok {
+						ctx.Callback.Data = payload
+						b.runRoute(route, ctx)
 
 						return
 					}
@@ -360,91 +381,62 @@ func (b *Bot) ProcessUpdate(upd Update) {
 			}
 		}
 
-		if handler, ok := b.handlers[OnCallback]; ok {
-			handler, ok := handler.(func(*Callback))
-			if !ok {
-				panic("telebot: callback handler is bad")
-			}
-
-			b.runHandler(func() { handler(upd.Callback) })
+		if route, ok := b.routes[OnCallback]; ok {
+			b.runRoute(route, ctx)
 		}
 
 		return
 	}
 
 	if upd.Query != nil {
-		if handler, ok := b.handlers[OnQuery]; ok {
-			handler, ok := handler.(func(*Query))
-			if !ok {
-				panic("telebot: query handler is bad")
-			}
-
-			b.runHandler(func() { handler(upd.Query) })
+		if route, ok := b.routes[OnQuery]; ok {
+			ctx.Query = upd.Query
+			b.runRoute(route, ctx)
 		}
 
 		return
 	}
 
 	if upd.ChosenInlineResult != nil {
-		if handler, ok := b.handlers[OnChosenInlineResult]; ok {
-			handler, ok := handler.(func(*ChosenInlineResult))
-			if !ok {
-				panic("telebot: chosen inline result handler is bad")
-			}
-
-			b.runHandler(func() { handler(upd.ChosenInlineResult) })
+		if route, ok := b.routes[OnChosenInlineResult]; ok {
+			ctx.ChosenInlineResult = upd.ChosenInlineResult
+			b.runRoute(route, ctx)
 		}
 
 		return
 	}
 
 	if upd.ShippingQuery != nil {
-		if handler, ok := b.handlers[OnShipping]; ok {
-			handler, ok := handler.(func(*ShippingQuery))
-			if !ok {
-				panic("telebot: shipping query handler is bad")
-			}
-
-			b.runHandler(func() { handler(upd.ShippingQuery) })
+		if route, ok := b.routes[OnShipping]; ok {
+			ctx.ShippingQuery = upd.ShippingQuery
+			b.runRoute(route, ctx)
 		}
 
 		return
 	}
 
 	if upd.PreCheckoutQuery != nil {
-		if handler, ok := b.handlers[OnCheckout]; ok {
-			handler, ok := handler.(func(*PreCheckoutQuery))
-			if !ok {
-				panic("telebot: pre checkout query handler is bad")
-			}
-
-			b.runHandler(func() { handler(upd.PreCheckoutQuery) })
+		if route, ok := b.routes[OnCheckout]; ok {
+			ctx.PreCheckoutQuery = upd.PreCheckoutQuery
+			b.runRoute(route, ctx)
 		}
 
 		return
 	}
 
 	if upd.Poll != nil {
-		if handler, ok := b.handlers[OnPoll]; ok {
-			handler, ok := handler.(func(*Poll))
-			if !ok {
-				panic("telebot: poll handler is bad")
-			}
-
-			b.runHandler(func() { handler(upd.Poll) })
+		if route, ok := b.routes[OnPoll]; ok {
+			ctx.Poll = upd.Poll
+			b.runRoute(route, ctx)
 		}
 
 		return
 	}
 
 	if upd.PollAnswer != nil {
-		if handler, ok := b.handlers[OnPollAnswer]; ok {
-			handler, ok := handler.(func(*PollAnswer))
-			if !ok {
-				panic("telebot: poll answer handler is bad")
-			}
-
-			b.runHandler(func() { handler(upd.PollAnswer) })
+		if route, ok := b.routes[OnPollAnswer]; ok {
+			ctx.PollAnswer = upd.PollAnswer
+			b.runRoute(route, ctx)
 		}
 
 		return
@@ -453,13 +445,13 @@ func (b *Bot) ProcessUpdate(upd Update) {
 }
 
 func (b *Bot) handle(end string, m *Message) bool {
-	if handler, ok := b.handlers[end]; ok {
-		handler, ok := handler.(func(*Message))
-		if !ok {
-			panic(fmt.Errorf("telebot: %s handler is bad", end))
+	if route, ok := b.routes[end]; ok {
+		ctx := &nativeContext{
+			b:       b,
+			Message: m,
 		}
+		b.runRoute(route, ctx)
 
-		b.runHandler(func() { handler(m) })
 		return true
 	}
 
