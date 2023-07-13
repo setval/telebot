@@ -109,7 +109,7 @@ func TestLayout(t *testing.T) {
 		},
 		Title:       "Some title",
 		Description: "Some description",
-		ThumbURL:    "https://preview.picture",
+		ThumbURL:    "https://dummyimage.com/600x400/000/fff",
 		Text:        "This is an article.",
 	}, lt.ResultLocale("en", "article", struct {
 		ID          int
@@ -120,6 +120,6 @@ func TestLayout(t *testing.T) {
 		ID:          1853,
 		Title:       "Some title",
 		Description: "Some description",
-		PreviewURL:  "https://preview.picture",
+		PreviewURL:  "https://dummyimage.com/600x400/000/fff",
 	}))
 }
