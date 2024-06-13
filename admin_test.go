@@ -34,6 +34,7 @@ func TestEmbedRights(t *testing.T) {
 		"can_promote_members":       false,
 		"can_manage_video_chats":    false,
 		"can_manage_chat":           false,
+		"can_manage_topics":         false,
 	}
 	assert.Equal(t, expected, params)
 }
